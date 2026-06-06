@@ -1,0 +1,16 @@
+# 시크릿 — 절대 커밋 금지
+.streamlit/secrets.toml
+
+# 로컬 데이터 (개인정보/첨부파일)
+user_data/
+
+# 로그/임시
+*.log
+_test_*.py
+
+# 파이썬
+__pycache__/
+*.pyc
+.venv/
+venv/
+.env

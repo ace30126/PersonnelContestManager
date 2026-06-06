@@ -1,0 +1,7 @@
+streamlit>=1.40
+requests
+beautifulsoup4
+anthropic>=0.40
+supabase>=2.0
+pandas
+openpyxl
