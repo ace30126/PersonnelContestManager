@@ -11,10 +11,12 @@
 실행:  streamlit run app.py
 """
 import re
+import hashlib
 import datetime as dt
 
 import pandas as pd
 import streamlit as st
+import extra_streamlit_components as stx
 
 from core import config
 from core.scraper import Scraper
@@ -142,6 +144,17 @@ section[data-testid="stSidebar"], div[data-testid="collapsedControl"] {{ display
 .botnav .bn-item.active {{ color:var(--accent); }}
 .botnav .bn-item.active .ic {{ filter:none; }}
 .topstatus {{ text-align:right; color:var(--muted); font-size:12px; }}
+
+/* 클릭 가능한 대시보드 항목 */
+a.navlink {{ text-decoration:none; color:inherit; display:block; }}
+a.navlink .tile, a.navlink .hero {{ transition:.15s; }}
+a.navlink:hover .tile, a.navlink:hover .hero {{
+    transform:translateY(-2px); border-color:#d9d2fb;
+    box-shadow:0 8px 24px rgba(108,92,231,.16);
+}}
+a.rowlink {{ text-decoration:none; color:inherit; display:block;
+    border-radius:10px; margin:0 -8px; padding:0 8px; transition:.12s; }}
+a.rowlink:hover {{ background:#f6f4ff; }}
 </style>
 """
 st.markdown(CSS, unsafe_allow_html=True)
@@ -170,6 +183,15 @@ def get_db():
 db = get_db()
 scraper = get_scraper()
 
+# 쿠키 매니저 (로그인 상태를 브라우저 쿠키로 유지 → 페이지 이동·새로고침에도 안 풀림)
+cookie_mgr = stx.CookieManager(key="mcm_cookies")
+AUTH_COOKIE = "mcm_auth"
+
+
+def _auth_token(pw: str) -> str:
+    """비밀번호로부터 쿠키에 저장할 토큰 생성(비번 바뀌면 자동 무효화)."""
+    return hashlib.sha256(f"mcm::{pw}".encode("utf-8")).hexdigest()
+
 
 # --------------------------------------------------------------------------- #
 # 로그인 게이트 (APP_PASSWORD 미설정 시 자동 통과 = 로컬용)
@@ -178,8 +200,41 @@ def login_gate():
     pw = config.get_secret("APP_PASSWORD")
     if not pw:
         return True
-    if st.session_state.get("authed"):
-        return True
+    token = _auth_token(str(pw))
+    saved = cookie_mgr.get(AUTH_COOKIE)  # 쿠키는 비동기 로드 → 첫 실행엔 None일 수 있음
+
+    logging_out = bool(st.query_params.get("logout")) or st.session_state.get("_logging_out")
+
+    if logging_out:
+        # 로그아웃: 쿠키 삭제 명령을 보내고(이 실행에서 플러시) 로그인 폼으로
+        st.session_state["_logging_out"] = True
+        st.session_state["authed"] = False
+        try:
+            del st.query_params["logout"]
+        except Exception:
+            pass
+        try:
+            cookie_mgr.delete(AUTH_COOKIE)  # 매 실행 멱등 삭제 (재로그인 시 _logging_out 해제됨)
+        except Exception:
+            pass
+    else:
+        # 이미 로그인된 세션: 쿠키가 없으면 지금(즉시 rerun 없는 일반 렌더에서) 저장
+        if st.session_state.get("authed"):
+            if saved != token:
+                cookie_mgr.set(AUTH_COOKIE, token,
+                               expires_at=dt.datetime.now() + dt.timedelta(days=30))
+            return True
+        # 쿠키에 유효 토큰이 있으면 자동 로그인
+        if saved == token:
+            st.session_state["authed"] = True
+            return True
+        # 쿠키 로드 대기(세션 첫 실행 1회): 로그인된 사용자에게 폼이 깜빡이는 것 방지
+        if saved is None and not st.session_state.get("_cookie_checked"):
+            st.session_state["_cookie_checked"] = True
+            st.markdown("<div class='pagetitle'>🏆 공모전 매니저</div>", unsafe_allow_html=True)
+            st.markdown("<div class='subtitle'>불러오는 중…</div>", unsafe_allow_html=True)
+            st.stop()
+
     st.markdown("<div class='pagetitle'>🏆 공모전 매니저</div>", unsafe_allow_html=True)
     st.markdown("<div class='subtitle'>로그인이 필요합니다.</div>", unsafe_allow_html=True)
     with st.form("login"):
@@ -187,7 +242,9 @@ def login_gate():
         ok = st.form_submit_button("로그인", type="primary")
     if ok:
         if entered == pw:
+            # 쿠키 저장은 다음 실행(위 authed 경로)에서 — set 직후 rerun하면 쓰기가 취소됨
             st.session_state["authed"] = True
+            st.session_state["_logging_out"] = False
             st.rerun()
         else:
             st.error("비밀번호가 올바르지 않습니다.")
@@ -236,15 +293,7 @@ NAV = [("dashboard", "🏠", "홈"), ("explore", "🔍", "탐색"),
        ("projects", "📂", "프로젝트"), ("profile", "👤", "프로필")]
 NAV_KEYS = [n[0] for n in NAV]
 
-# 로그아웃 처리
-if st.query_params.get("logout"):
-    st.session_state["authed"] = False
-    try:
-        del st.query_params["logout"]
-    except Exception:
-        pass
-    st.rerun()
-
+# (로그아웃은 login_gate 안에서 쿠키 삭제와 함께 처리)
 page = st.query_params.get("nav", "dashboard")
 if page not in NAV_KEYS:
     page = "dashboard"
@@ -303,34 +352,38 @@ def page_dashboard():
     st.markdown(f"<div class='hello'>안녕하세요<b>{name}님 👋</b></div>", unsafe_allow_html=True)
     st.write("")
 
-    # ---- 히어로: 가장 가까운 마감 카운트다운 ----
+    # ---- 히어로: 가장 가까운 마감 카운트다운 (클릭 → 해당 프로젝트) ----
     if upcoming:
         d, p = upcoming[0]
         meta = p.get("meta", {})
         big = "D-DAY" if d == 0 else f"D-{d}"
         st.markdown(
+            f"<a class='navlink' href='?nav=projects&pid={p['id']}' target='_self'>"
             f"<div class='hero'><div class='pill'>🔥 가장 가까운 마감</div>"
             f"<div class='big'>{big}</div>"
             f"<div class='ttl'>{meta.get('title','')}</div>"
-            f"<div class='sub'>{meta.get('category','')} · {meta.get('organizer','')}</div></div>",
+            f"<div class='sub'>{meta.get('category','')} · {meta.get('organizer','')}</div></div></a>",
             unsafe_allow_html=True,
         )
     else:
         st.markdown(
+            "<a class='navlink' href='?nav=explore' target='_self'>"
             "<div class='hero'><div class='pill'>🔥 마감 카운트다운</div>"
             "<div class='big' style='font-size:34px;color:#9AA0A6'>예정된 마감 없음</div>"
-            "<div class='sub'>‘공모전 탐색’에서 새 공모전에 참가해보세요.</div></div>",
+            "<div class='sub'>‘공모전 탐색’에서 새 공모전에 참가해보세요.</div></div></a>",
             unsafe_allow_html=True,
         )
 
-    # ---- 통계 타일 ----
+    # ---- 통계 타일 (클릭 → 프로젝트 목록) ----
     c1, c2, c3, c4 = st.columns(4)
     for col, label, value, cls in [
         (c1, "전체 프로젝트", total, ""), (c2, "진행중", ongoing, "p"),
         (c3, "마감 임박", len(soon), "r"), (c4, "수상", won, "g"),
     ]:
-        col.markdown(f"<div class='tile'><div class='label'>{label}</div>"
-                     f"<div class='value {cls}'>{value}</div></div>", unsafe_allow_html=True)
+        col.markdown(
+            f"<a class='navlink' href='?nav=projects' target='_self'>"
+            f"<div class='tile'><div class='label'>{label}</div>"
+            f"<div class='value {cls}'>{value}</div></div></a>", unsafe_allow_html=True)
     st.write("")
 
     left, right = st.columns([1, 1])
@@ -369,11 +422,12 @@ def page_dashboard():
             meta = p.get("meta", {})
             color = dot_colors[d <= 7]
             rows += (
+                f"<a class='rowlink' href='?nav=projects&pid={p['id']}' target='_self'>"
                 f"<div class='barrow' style='justify-content:space-between'>"
                 f"<div><span class='dot' style='background:{color}'></span>"
                 f"<b style='color:var(--ink)'>{meta.get('title','')}</b><br>"
                 f"<span style='color:var(--muted);font-size:12px;margin-left:17px'>{meta.get('organizer','')}</span></div>"
-                f"<div>{dday_badge(meta.get('dday',''))}</div></div>"
+                f"<div>{dday_badge(meta.get('dday',''))}</div></div></a>"
             )
         if not rows:
             rows = "<div style='color:#9AA0A6;font-size:13px'>다가오는 마감이 없어요.</div>"
@@ -458,9 +512,11 @@ def page_explore():
         prof = db.get_profile()
         if not prof:
             st.warning("먼저 '프로필'을 입력하면 더 정확하게 추천돼요.")
-        with st.spinner("Claude가 내 프로필을 분석해 추천 중..."):
+        history = db.list_projects()  # 여태 참가한 공모전 이력도 함께 반영
+        with st.spinner("Claude가 내 프로필과 참가 이력을 분석해 추천 중..."):
             try:
-                st.session_state["recs"] = ai.recommend_contests(prof, contests, top_n=5)
+                st.session_state["recs"] = ai.recommend_contests(
+                    prof, contests, top_n=5, history=history)
             except Exception as e:
                 st.error(f"AI 추천 실패: {e}")
     if not config.anthropic_configured():
@@ -567,7 +623,24 @@ def page_projects():
         return
 
     labels = {f"{p['meta'].get('title','(제목없음)')}  ·  {p.get('status','')}": p for p in projects}
-    sel = st.selectbox("프로젝트 선택", list(labels.keys()))
+    keys = list(labels.keys())
+
+    # 대시보드에서 항목을 클릭해 넘어온 경우(?pid=...) 해당 프로젝트를 선택 상태로
+    pid_q = st.query_params.get("pid")
+    if pid_q:
+        for lbl, pp in labels.items():
+            if pp["id"] == pid_q:
+                st.session_state["proj_sel"] = lbl
+                break
+        try:
+            del st.query_params["pid"]
+        except Exception:
+            pass
+    # 저장된 선택이 현재 목록에 없으면(삭제 등) 초기화
+    if st.session_state.get("proj_sel") not in keys:
+        st.session_state.pop("proj_sel", None)
+
+    sel = st.selectbox("프로젝트 선택", keys, key="proj_sel")
     p = labels[sel]
     pid = p["id"]
     meta = p.get("meta", {})
@@ -602,9 +675,19 @@ def page_projects():
                 st.success("저장했습니다.")
                 st.rerun()
 
-        if st.button("🗑 이 프로젝트 삭제"):
+        st.markdown("---")
+        dc1, dc2 = st.columns(2)
+        if dc1.button("🗑 이 프로젝트 삭제", key=f"del_{pid}", use_container_width=True):
             db.delete_project(pid)
+            st.session_state.pop("proj_sel", None)
             st.success("삭제했습니다.")
+            st.rerun()
+        if dc2.button("🙈 삭제 후 숨기기", key=f"delhide_{pid}", use_container_width=True,
+                      help="삭제하고, 탐색 목록에서도 다시 안 뜨도록 숨깁니다."):
+            db.add_hidden(meta)          # 탐색에서 다시 안 보이도록(seen에도 등록됨)
+            db.delete_project(pid)
+            st.session_state.pop("proj_sel", None)
+            st.success("삭제하고 숨겼습니다. ‘탐색’에서 다시 보이지 않아요.")
             st.rerun()
 
     # --- 첨부파일 ---

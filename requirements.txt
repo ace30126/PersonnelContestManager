@@ -5,3 +5,4 @@ anthropic>=0.40
 supabase>=2.0
 pandas
 openpyxl
+extra-streamlit-components>=0.1.71

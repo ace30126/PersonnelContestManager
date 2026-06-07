@@ -39,6 +39,23 @@ def _profile_text(profile: dict) -> str:
     return "\n".join(lines) if lines else "(프로필 정보 없음)"
 
 
+def _history_text(projects: list) -> str:
+    """참가/진행 중인 프로젝트(=참가 이력)를 추천 판단용 요약 텍스트로."""
+    if not projects:
+        return "(아직 참가한 공모전이 없음)"
+    lines = []
+    for p in projects:
+        m = p.get("meta", {}) or {}
+        title = m.get("title", "(제목없음)")
+        cat = m.get("category", "")
+        org = m.get("organizer", "")
+        status = p.get("status", "")
+        bits = " · ".join(x for x in (cat, org) if x)
+        suffix = f" — {bits}" if bits else ""
+        lines.append(f"- {title}{suffix}{f' [{status}]' if status else ''}")
+    return "\n".join(lines)
+
+
 # --------------------------------------------------------------------------- #
 # 1) 공모전 추천
 # --------------------------------------------------------------------------- #
@@ -68,8 +85,10 @@ RECOMMEND_TOOL = {
 }
 
 
-def recommend_contests(profile: dict, contests: list, top_n: int = 5) -> list:
+def recommend_contests(profile: dict, contests: list, top_n: int = 5,
+                       history: list = None) -> list:
     """contests: [{id,title,category,organizer,dday,link}, ...]
+    history: 내가 참가/진행 중인 프로젝트 목록(list_projects 결과). 추천 맥락에 반영.
     반환: [{id,title,score,reason,tips}, ...] (적합도 내림차순)"""
     if not contests:
         return []
@@ -87,15 +106,18 @@ def recommend_contests(profile: dict, contests: list, top_n: int = 5) -> list:
         "type": "text",
         "text": (
             "당신은 공모전/대외활동 전문 컨설턴트입니다. 사용자의 프로필(전공, 역량, "
-            "이력, 관심사)을 분석해 성향을 파악하고, 주어진 공모전 목록 중 가장 적합한 "
-            "것을 골라 적합도 점수와 구체적 근거를 제시합니다. 반드시 recommend 도구로만 "
-            "답하세요. id는 목록의 값을 그대로 사용합니다."
+            "이력, 관심사)과 지금까지 참가한 공모전 이력을 함께 분석해 성향을 파악하고, "
+            "주어진 공모전 목록 중 가장 적합한 것을 골라 적합도 점수와 구체적 근거를 "
+            "제시합니다. 참가 이력과 결이 맞는(또는 역량을 확장할 수 있는) 공모전을 "
+            "우선하되, 이미 참가한 것과 지나치게 겹치는 것은 그 점을 근거에 언급하세요. "
+            "반드시 recommend 도구로만 답하세요. id는 목록의 값을 그대로 사용합니다."
         ),
         "cache_control": {"type": "ephemeral"},
     }]
 
     user = (
         f"[내 프로필]\n{_profile_text(profile)}\n\n"
+        f"[내 참가/진행 이력]\n{_history_text(history)}\n\n"
         f"[새로 발견된 공모전 목록(JSON)]\n{json.dumps(slim, ensure_ascii=False)}\n\n"
         f"위 목록에서 나에게 가장 적합한 공모전 TOP {top_n}을 골라 추천해줘."
     )
